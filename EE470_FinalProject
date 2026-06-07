@@ -1,0 +1,888 @@
+% EE 470 Final Project 
+% Comparison of A* and RRT* path planning algorithms 
+
+% Authors: Rodrigo Menchaca, Paul Levit 
+
+clc;
+clear;
+close all;
+
+%%=========================================================================
+% Section 1: Create automated driving scenario
+%This section creates the simulated driving environment using the Automated
+%Driving Toolbox. drivingScenario object is used to define the road layout,
+%lane structure, ego vehicle and static obstacles vehicles. For this
+%project, the ego vehicle represents the autonomous vehicle that must plan
+%a collision-free path from the start node into the goal node. 
+
+%The road we are modeling is a straight two-lane road, and several stopped
+%vehicles are placed along the road to act as obstacles. These obstaceles
+%force the path planning algorithms to generate routes that avoid these
+%collision while still staying within the drivable road area. 
+
+%This section provides the autonomous driving context for the project.
+%Later sections will convert the scenario into an occupancy map
+% were we can implement the A* and RRT* planners 
+% 3 scenarios will be tested: Straight road with obstacles, 
+%                             curved road with obstacles,
+%                             and a city/intersection road layout with
+%                             multiple streets.
+%choose scenario 
+% 1= straight road 
+% 2 = curved road 
+% 3 = multi-street intersection 
+
+scenarioID = 3;
+
+% creating driving scenario object 
+scenario = drivingScenario('SampleTime',0.1,'StopTime',10);
+
+%%default vehicle dimensions
+
+egoLength = 4.7;
+egoWidth  = 1.8;
+
+obsLength = 4.7;
+obsWidth =  2.0;
+
+% defining each scenario setup
+switch scenarioID
+
+    case 1 
+        % Scenario 1: straight road with obstacles
+        scenarioName ='Scenario 1: Straight Road';
+
+        %defining map limits for occupancy map
+        mapXLimits = [0 60];
+        mapYLimits = [-8 8];
+
+        %start and end goal in driving scenario coordinates 
+        startDriving = [5 -3 0];
+        goalDriving = [55 3 0];
+
+        %creating straight two-lane road
+        roadCenters = [0 0 0
+                       60 0 0
+                       ];
+        road(scenario, roadCenters, ...
+            'Lanes', lanespec(2),...
+            'Name', 'Straight Road');
+
+        %obstacle vehicles 
+        %format [x y yaw ]
+
+        obstacleVehicles = [ 20 -3 0
+                             32 3  0
+                             45 -2 0
+                             ];
+    case 2
+        %scenario 2: curved road 
+
+        scenarioName = 'Scenario 2: Curved Road';
+
+         % Map limits used for occupancy map
+        mapXLimits = [0 75];
+        mapYLimits = [-15 25];
+
+        % Start and goal in driving scenario coordinates
+        startDriving = [5 -2 0];
+        goalDriving  = [70 12 0];
+
+        % Create curved road using multiple center points
+         roadCenters = [
+        0    0
+        5    0.5
+        10   1.5
+        15   3.5
+        20   6.5
+        25   9.5
+        30   12.0
+        35   13.5
+        40   14.0
+        45   13.5
+        50   12.5
+        55   11.5
+        60   11.0
+        65   11.2
+        70   12.0
+    ];
+
+        road(scenario, roadCenters, ...
+            'Lanes', lanespec(2), ...
+            'Name', 'Curved Road');
+
+        % Obstacle vehicles
+        % Format: [x y yaw]
+        obstacleVehicles = [
+    12   2.0    15
+    32   12.5   20
+    55   11.5   -5
+    ];
+        
+    case 3 
+        %scenario 3: multi-street intersection
+
+        scenarioName = 'Scenario 3: Multi-Street Intersection';
+        % Map limits for the occupancy map
+        mapXLimits = [0 80];
+        mapYLimits = [-20 45];
+
+        % Start and goal in driving scenario coordinates
+        startDriving = [5 0 0];
+        goalDriving  = [75 25 0];
+
+        % Create horizontal streets
+        road(scenario, [0 0 0; 80 0 0], ...
+            'Lanes', lanespec(2), ...
+            'Name', 'Street 1');
+
+        road(scenario, [0 25 0; 80 25 0], ...
+            'Lanes', lanespec(2), ...
+            'Name', 'Street 2');
+
+        % Create vertical streets
+        road(scenario, [20 -20 0; 20 45 0], ...
+            'Lanes', lanespec(2), ...
+            'Name', 'Avenue 1');
+
+        road(scenario, [55 -20 0; 55 45 0], ...
+            'Lanes', lanespec(2), ...
+            'Name', 'Avenue 2');
+
+        % Obstacle vehicles
+        % Format: [x y yaw]
+        obstacleVehicles = [
+            30   0    0
+            55   10   90
+            45   25   0
+            20   30   90
+        ];
+
+    otherwise
+        error('Invalid scenarioID. Use 1, 2, or 3.');
+end
+
+% add ego vehicle
+
+ego = vehicle(scenario, ...
+    'ClassID', 1, ...
+    'Position', startDriving, ...
+    'Length', egoLength, ...
+    'Width', egoWidth, ...
+    'Height', 1.4, ...
+    'Name', 'Ego Vehicle');
+
+%add obstacle vehicles 
+for i = 1:size(obstacleVehicles, 1)
+
+    obsX = obstacleVehicles(i, 1);
+    obsY = obstacleVehicles(i, 2);
+    obsYaw = obstacleVehicles(i, 3);
+
+    vehicle(scenario, ...
+        'ClassID', 1, ...
+        'Position', [obsX obsY 0], ...
+        'Yaw', obsYaw, ...
+        'Length', obsLength, ...
+        'Width', obsWidth, ...
+        'Height', 1.5, ...
+        'Name', sprintf('Obstacle %d', i));
+end
+
+%plotting of selected driving scenario 
+
+figure;
+plot(scenario);
+title(scenarioName);
+xlabel(' X Position [m]');
+ylabel('Y Position [m]');
+grid on;
+axis equal;
+
+hold on;
+
+plot(startDriving(1), startDriving(2), 'go', ...
+    'MarkerSize', 10, 'LineWidth', 2);
+
+plot(goalDriving(1), goalDriving(2), 'rx', ...
+    'MarkerSize', 10, 'LineWidth', 2);
+
+legend('Driving Scenario', 'Start', 'Goal');
+
+
+%%=========================================================================
+% Section 2: Conversion of selected driving scenario to occupancy map 
+% This section converts the selected automated driving toolbox scenario
+% into a binary occupancy map that can be used by the A* and RRT* path
+% planners. The drivingScenario object is only useful for visualizing roads
+% vehicles and obstacles, but path planning algorithms require an occupancy
+% maps
+
+% The map is first initialized as fully occupied. Then, the drivable road
+% regins are carved out as free spance based on the road centerlines from
+% the selected scenarion. After free road is specified. obstacle cars are
+% added back as occupied regions. Obstacles are inflated to include vehicle
+% clearence, this helps prevent planned paths from passing too close to
+% parked vehicles or road edges
+
+% start and goal nodes are also shifted into positive occupancy map
+% coordinates sicne some driving scenarios use negative y-values. 
+
+%% Map Parameters
+
+resolution = 5;      % cells per meter
+
+mapLength = mapXLimits(2) - mapXLimits(1);
+mapWidth  = mapYLimits(2) - mapYLimits(1);
+
+xOffset = -mapXLimits(1);
+yOffset = -mapYLimits(1);
+
+map = binaryOccupancyMap(mapLength, mapWidth, resolution);
+
+%% Fill Entire Map as Occupied
+
+[xAll, yAll] = meshgrid(0:0.1:mapLength, 0:0.1:mapWidth);
+allPoints = [xAll(:), yAll(:)];
+setOccupancy(map, allPoints, 1);
+
+%% Road Width
+
+roadWidth = 8.0;     % meters
+
+%% Clear Drivable Road Regions
+
+switch scenarioID
+
+    case 1
+        % Scenario 1: straight road along x-axis
+        clearRoadRectangle(map, ...
+            0 + xOffset, ...
+            -roadWidth/2 + yOffset, ...
+            60 + xOffset, ...
+            roadWidth/2 + yOffset);
+
+    case 2
+        % Scenario 2: curved road approximation using connected segments
+         roadCenters = [
+        0    0
+        5    0.5
+        10   1.5
+        15   3.5
+        20   6.5
+        25   9.5
+        30   12.0
+        35   13.5
+        40   14.0
+        45   13.5
+        50   12.5
+        55   11.5
+        60   11.0
+        65   11.2
+        70   12.0
+    ];
+
+        clearRoadPolyline(map, roadCenters, roadWidth, xOffset, yOffset);
+
+    case 3
+        % Scenario 3: multi-street layout
+
+        % Horizontal street 1: y = 0
+        clearRoadRectangle(map, ...
+            0 + xOffset, ...
+            -roadWidth/2 + yOffset, ...
+            80 + xOffset, ...
+            roadWidth/2 + yOffset);
+
+        % Horizontal street 2: y = 25
+        clearRoadRectangle(map, ...
+            0 + xOffset, ...
+            25 - roadWidth/2 + yOffset, ...
+            80 + xOffset, ...
+            25 + roadWidth/2 + yOffset);
+
+        % Vertical avenue 1: x = 20
+        clearRoadRectangle(map, ...
+            20 - roadWidth/2 + xOffset, ...
+            -20 + yOffset, ...
+            20 + roadWidth/2 + xOffset, ...
+            45 + yOffset);
+
+        % Vertical avenue 2: x = 55
+        clearRoadRectangle(map, ...
+            55 - roadWidth/2 + xOffset, ...
+            -20 + yOffset, ...
+            55 + roadWidth/2 + xOffset, ...
+            45 + yOffset);
+
+    otherwise
+        error('Invalid scenarioID. Use 1, 2, or 3.');
+end
+
+%% Convert Start and Goal to Occupancy Map Coordinates
+
+start = [
+    startDriving(1) + xOffset, ...
+    startDriving(2) + yOffset, ...
+    startDriving(3)
+];
+
+goal = [
+    goalDriving(1) + xOffset, ...
+    goalDriving(2) + yOffset, ...
+    goalDriving(3)
+];
+
+%% Add Obstacle Vehicles to Occupancy Map
+
+for i = 1:size(obstacleVehicles, 1)
+
+    obsX = obstacleVehicles(i, 1) + xOffset;
+    obsY = obstacleVehicles(i, 2) + yOffset;
+    obsYaw = deg2rad(obstacleVehicles(i, 3));
+
+    addRotatedObstacle(map, obsX, obsY, obsLength, obsWidth, obsYaw);
+end
+
+%% Inflate Obstacles for Vehicle Clearance
+
+vehicleClearance = 0.5;
+inflate(map, vehicleClearance);
+
+%% Clear Start and Goal Areas
+
+clearRadius = 1.2;
+
+clearCircle(map, start(1), start(2), clearRadius);
+clearCircle(map, goal(1), goal(2), clearRadius);
+
+%% Display Occupancy Map
+
+figure;
+show(map);
+hold on;
+
+plot(start(1), start(2), 'go', ...
+    'MarkerSize', 10, ...
+    'LineWidth', 2);
+
+plot(goal(1), goal(2), 'rx', ...
+    'MarkerSize', 10, ...
+    'LineWidth', 2);
+
+title(['Occupancy Map for ', scenarioName]);
+xlabel('X Position on Occupancy Map [m]');
+ylabel('Y Position on Occupancy Map [m]');
+legend('Start', 'Goal');
+grid on;
+axis equal;
+
+
+%%========================================================================= 
+% Section 3: A* Path planning
+%==========================================================================
+% This section runs the A* path planning algorithm on the occupancy map
+% created in section 2. A* is a grid-based search algorithm. This means
+% that the start and goal position must first be converted from world
+% coordinates into grid coordinates. Then, the planner searches for the
+% shortest collision free path through the free cells of the occupancy map
+
+% The computation time will be measured using tico/toc so it can be later
+% compared against the RRT* algorithm. Once valid point is found, the path
+% will be converted back from grid coordinates into world coordinates for
+% plotting and metric calculations
+
+fprintf('Running A* planner...\n');
+
+astarTimer = tic;
+
+% Create A* planner using the occupancy map
+astarPlanner = plannerAStarGrid(map);
+
+% Convert start and goal from world coordinates to grid coordinates
+startGrid = world2grid(map, start(1:2));
+goalGrid  = world2grid(map, goal(1:2));
+
+% Run A* path planner
+[pathGrid, astarInfo] = plan(astarPlanner, startGrid, goalGrid);
+
+% Stop timer
+astarTime = toc(astarTimer);
+
+% Check whether A* found a valid path
+if ~isempty(pathGrid)
+
+    % Convert grid path back to world coordinates
+    astarPathXY = grid2world(map, pathGrid);
+
+    astarSuccess = true;
+
+    fprintf('A* successfully found a path.\n');
+    fprintf('A* computation time: %.4f seconds\n\n', astarTime);
+
+else
+
+    astarPathXY = [];
+    astarSuccess = false;
+
+    fprintf('A* failed to find a valid path.\n');
+    fprintf('A* computation time: %.4f seconds\n\n', astarTime);
+
+end
+%%=========================================================================
+% Section 4: RRT* path planning
+%==========================================================================
+
+% This section rungs the RRT* path planning algorithm on the same occupancy
+% map as A*. RRT* is a sampling-based planner that randomly explores the
+% environment by building a tree of possible vehicle states. In comparison
+% to A* which searches a grid, RRT* plans in a continous state space
+% using the vehicle state [x,y,theta].
+
+% The planner uses the occupancy map to check whetere each sampled state
+% and connection is collision free. computation time is also measured so it
+% can be compared to against A*. since RRT* is random, there's a
+% possibility for production of different paths each time the script is
+% run.
+fprintf('Running RRT* planner...\n');
+
+rrtTimer = tic;
+
+% Define state space for vehicle motion: [x y theta]
+ss = stateSpaceSE2;
+
+% Set bounds based on the occupancy map size from Section 3
+ss.StateBounds = [
+    0, mapLength
+    0, mapWidth
+    -pi, pi
+];
+
+% Create collision validator using the occupancy map
+sv = validatorOccupancyMap(ss);
+sv.Map = map;
+sv.ValidationDistance = 0.1;
+
+% Create RRT* planner
+rrtPlanner = plannerRRTStar(ss, sv);
+
+% RRT* tuning parameters
+rrtPlanner.MaxIterations = 6000;
+rrtPlanner.MaxConnectionDistance = 3.0;
+rrtPlanner.MaxNumTreeNodes = 8000;
+
+% Allow RRT* to keep improving the path after the first solution is found
+rrtPlanner.ContinueAfterGoalReached = true;
+
+% Goal is reached when the planner gets close enough to the goal position
+rrtPlanner.GoalReachedFcn = @(planner, currentState, goalState) ...
+    norm(currentState(1:2) - goalState(1:2)) < 1.0;
+
+% Run RRT* planner
+[rrtPathObj, rrtInfo] = plan(rrtPlanner, start, goal);
+
+% Stop timer
+rrtTime = toc(rrtTimer);
+
+% Check whether RRT* found a valid path
+if rrtInfo.IsPathFound
+
+    rrtPath = rrtPathObj.States;
+    rrtPathXY = rrtPath(:,1:2);
+
+    rrtSuccess = true;
+
+    fprintf('RRT* successfully found a path.\n');
+    fprintf('RRT* computation time: %.4f seconds\n\n', rrtTime);
+
+else
+
+    rrtPathXY = [];
+    rrtSuccess = false;
+
+    fprintf('RRT* failed to find a valid path.\n');
+    fprintf('RRT* computation time: %.4f seconds\n\n', rrtTime);
+
+end
+
+%%=========================================================================
+% Section 5: Computation of performance metrics
+%==========================================================================
+% This section evaluates the paths generated by A* and RRT*. The goal is to
+% compare both algorithms by using the same performance metrics described
+% in the project proposal:
+% 1.Success
+% 2.Collision-free result
+% 3.Computation time 
+% 4. Path length 
+% 5. Smoothness
+% Metrics will be stored in a matlab table for display
+%% Compute Path Length
+
+astarLength = computePathLength(astarPathXY);
+rrtLength   = computePathLength(rrtPathXY);
+
+%% Compute Path Smoothness
+
+astarSmoothness = computeSmoothness(astarPathXY);
+rrtSmoothness   = computeSmoothness(rrtPathXY);
+
+%% Check Whether Paths Are Collision-Free
+
+astarCollisionFree = checkCollisionFree(astarPathXY, map);
+rrtCollisionFree   = checkCollisionFree(rrtPathXY, map);
+
+%% Create Results Table
+
+Scenario = [
+    string(scenarioName)
+    string(scenarioName)
+];
+
+Algorithm = [
+    "A*"
+    "RRT*"
+];
+
+Success = [
+    astarSuccess
+    rrtSuccess
+];
+
+CollisionFree = [
+    astarCollisionFree
+    rrtCollisionFree
+];
+
+ComputationTime_sec = [
+    astarTime
+    rrtTime
+];
+
+PathLength_m = [
+    astarLength
+    rrtLength
+];
+
+Smoothness_rad = [
+    astarSmoothness
+    rrtSmoothness
+];
+
+resultsTable = table(Scenario, Algorithm, Success, CollisionFree, ...
+    ComputationTime_sec, PathLength_m, Smoothness_rad);
+
+%% Display Results
+
+fprintf('\n============================================================\n');
+fprintf(' RESULTS FOR %s\n', scenarioName);
+fprintf('============================================================\n');
+
+disp(resultsTable);
+
+%%=========================================================================
+% Section 6: plotting of final paths and performance results 
+%==========================================================================
+% This section visualizes the results from A* and RRT* for further
+% discussion and comparison of performances
+
+
+%% Plot Paths on Occupancy Map
+
+figure;
+show(map);
+hold on;
+
+plot(start(1), start(2), 'go', ...
+    'MarkerSize', 10, ...
+    'LineWidth', 2);
+
+plot(goal(1), goal(2), 'rx', ...
+    'MarkerSize', 10, ...
+    'LineWidth', 2);
+
+if astarSuccess
+    plot(astarPathXY(:,1), astarPathXY(:,2), 'b-', ...
+        'LineWidth', 2);
+end
+
+if rrtSuccess
+    plot(rrtPathXY(:,1), rrtPathXY(:,2), 'm-', ...
+        'LineWidth', 2);
+end
+
+title(['A* vs RRT* on Occupancy Map - ', scenarioName]);
+xlabel('X Position on Occupancy Map [m]');
+ylabel('Y Position on Occupancy Map [m]');
+grid on;
+axis equal;
+
+legendEntries = {'Start', 'Goal'};
+
+if astarSuccess
+    legendEntries{end+1} = 'A* Path';
+end
+
+if rrtSuccess
+    legendEntries{end+1} = 'RRT* Path';
+end
+
+legend(legendEntries, 'Location', 'best');
+
+%% Convert Paths Back to Driving Scenario Coordinates
+
+astarPathDriving = astarPathXY;
+rrtPathDriving = rrtPathXY;
+
+if ~isempty(astarPathDriving)
+    astarPathDriving(:,1) = astarPathDriving(:,1) - xOffset;
+    astarPathDriving(:,2) = astarPathDriving(:,2) - yOffset;
+end
+
+if ~isempty(rrtPathDriving)
+    rrtPathDriving(:,1) = rrtPathDriving(:,1) - xOffset;
+    rrtPathDriving(:,2) = rrtPathDriving(:,2) - yOffset;
+end
+
+%% Plot Paths on Automated Driving Scenario
+figure;
+ax = axes;
+
+% Plot the Automated Driving Toolbox scenario
+plot(scenario, 'Parent', ax);
+hold(ax, 'on');
+
+% Plot start and goal
+hStart = plot(ax, startDriving(1), startDriving(2), 'go', ...
+    'MarkerSize', 10, ...
+    'LineWidth', 2);
+
+hGoal = plot(ax, goalDriving(1), goalDriving(2), 'rx', ...
+    'MarkerSize', 10, ...
+    'LineWidth', 2);
+
+% Initialize legend handles and labels
+legendHandles = [hStart, hGoal];
+legendLabels = {'Start', 'Goal'};
+
+% Plot A* path
+if astarSuccess && ~isempty(astarPathDriving)
+    hAstar = plot(ax, astarPathDriving(:,1), astarPathDriving(:,2), ...
+        'b-', ...
+        'LineWidth', 2.5);
+
+    legendHandles(end+1) = hAstar;
+    legendLabels{end+1} = 'A* Path';
+end
+
+% Plot RRT* path
+if rrtSuccess && ~isempty(rrtPathDriving)
+    hRRT = plot(ax, rrtPathDriving(:,1), rrtPathDriving(:,2), ...
+        'm-', ...
+        'LineWidth', 2.5);
+
+    legendHandles(end+1) = hRRT;
+    legendLabels{end+1} = 'RRT* Path';
+end
+
+title(ax, ['Planned Paths on Driving Scenario - ', scenarioName]);
+xlabel(ax, 'X Position [m]');
+ylabel(ax, 'Y Position [m]');
+grid(ax, 'on');
+axis(ax, 'equal');
+
+xlim(ax, [mapXLimits(1)-5, mapXLimits(2)+5]);
+ylim(ax, [mapYLimits(1)-5, mapYLimits(2)+5]);
+
+legend(ax, legendHandles, legendLabels, 'Location', 'best');
+
+
+%% Bar Plot: Computation Time
+
+figure;
+bar(categorical(Algorithm), ComputationTime_sec);
+ylabel('Computation Time [s]');
+title(['Computation Time Comparison - ', scenarioName]);
+grid on;
+
+%% Bar Plot: Path Length
+
+figure;
+bar(categorical(Algorithm), PathLength_m);
+ylabel('Path Length [m]');
+title(['Path Length Comparison - ', scenarioName]);
+grid on;
+
+%% Bar Plot: Path Smoothness
+
+figure;
+bar(categorical(Algorithm), Smoothness_rad);
+ylabel('Total Turning Angle [rad]');
+title(['Path Smoothness Comparison - ', scenarioName]);
+grid on;
+
+
+
+
+% Helper functions for Section 2
+
+
+function clearRoadRectangle(map, xMin, yMin, xMax, yMax)
+
+    [X, Y] = meshgrid(xMin:0.05:xMax, yMin:0.05:yMax);
+    points = [X(:), Y(:)];
+
+    validIdx = points(:,1) >= 0 & points(:,1) <= map.XWorldLimits(2) & ...
+               points(:,2) >= 0 & points(:,2) <= map.YWorldLimits(2);
+
+    points = points(validIdx, :);
+
+    if ~isempty(points)
+        setOccupancy(map, points, 0);
+    end
+end
+
+function clearRoadPolyline(map, roadCenters, roadWidth, xOffset, yOffset)
+
+    roadSampleStep = 0.15;
+    widthSampleStep = 0.15;
+
+    for i = 1:size(roadCenters,1)-1
+
+        p1 = roadCenters(i,:);
+        p2 = roadCenters(i+1,:);
+
+        segmentVector = p2 - p1;
+        segmentLength = norm(segmentVector);
+
+        if segmentLength == 0
+            continue;
+        end
+
+        direction = segmentVector / segmentLength;
+        normal = [-direction(2), direction(1)];
+
+        sValues = 0:roadSampleStep:segmentLength;
+        wValues = -roadWidth/2:widthSampleStep:roadWidth/2;
+
+        freePoints = [];
+
+        for s = sValues
+            centerPoint = p1 + s * direction;
+
+            for w = wValues
+                roadPointDriving = centerPoint + w * normal;
+
+                roadPointMap = [
+                    roadPointDriving(1) + xOffset, ...
+                    roadPointDriving(2) + yOffset
+                ];
+
+                freePoints = [freePoints; roadPointMap];
+            end
+        end
+
+        validIdx = freePoints(:,1) >= 0 & freePoints(:,1) <= map.XWorldLimits(2) & ...
+                   freePoints(:,2) >= 0 & freePoints(:,2) <= map.YWorldLimits(2);
+
+        freePoints = freePoints(validIdx, :);
+
+        if ~isempty(freePoints)
+            setOccupancy(map, freePoints, 0);
+        end
+    end
+end
+
+function addRotatedObstacle(map, obsX, obsY, obsLength, obsWidth, obsYaw)
+
+    xLocal = -obsLength/2:0.05:obsLength/2;
+    yLocal = -obsWidth/2:0.05:obsWidth/2;
+
+    [Xlocal, Ylocal] = meshgrid(xLocal, yLocal);
+    localPoints = [Xlocal(:), Ylocal(:)];
+
+    R = [
+        cos(obsYaw), -sin(obsYaw)
+        sin(obsYaw),  cos(obsYaw)
+    ];
+
+    rotatedPoints = localPoints * R';
+
+    obstaclePoints = rotatedPoints + [obsX, obsY];
+
+    validIdx = obstaclePoints(:,1) >= 0 & obstaclePoints(:,1) <= map.XWorldLimits(2) & ...
+               obstaclePoints(:,2) >= 0 & obstaclePoints(:,2) <= map.YWorldLimits(2);
+
+    obstaclePoints = obstaclePoints(validIdx, :);
+
+    if ~isempty(obstaclePoints)
+        setOccupancy(map, obstaclePoints, 1);
+    end
+end
+
+function clearCircle(map, xCenter, yCenter, radius)
+
+    [X, Y] = meshgrid( ...
+        xCenter-radius:0.05:xCenter+radius, ...
+        yCenter-radius:0.05:yCenter+radius);
+
+    points = [X(:), Y(:)];
+
+    distances = sqrt((points(:,1)-xCenter).^2 + (points(:,2)-yCenter).^2);
+    points = points(distances <= radius, :);
+
+    validIdx = points(:,1) >= 0 & points(:,1) <= map.XWorldLimits(2) & ...
+               points(:,2) >= 0 & points(:,2) <= map.YWorldLimits(2);
+
+    points = points(validIdx, :);
+
+    if ~isempty(points)
+        setOccupancy(map, points, 0);
+    end
+end
+
+%Helper functions for section 5
+function pathLength = computePathLength(path)
+    if isempty(path) || size(path,1) < 2
+        pathLength = NaN;
+        return;
+    end
+
+    diffs = diff(path(:,1:2));
+    segmentLengths = sqrt(sum(diffs.^2, 2));
+    pathLength = sum(segmentLengths);
+end
+
+function smoothness = computeSmoothness(path)
+    if isempty(path) || size(path,1) < 3
+        smoothness = NaN;
+        return;
+    end
+
+    smoothness = 0;
+
+    for i = 2:size(path,1)-1
+        v1 = path(i,:) - path(i-1,:);
+        v2 = path(i+1,:) - path(i,:);
+
+        if norm(v1) == 0 || norm(v2) == 0
+            continue;
+        end
+
+        cosTheta = dot(v1, v2) / (norm(v1) * norm(v2));
+        cosTheta = max(min(cosTheta, 1), -1);
+
+        angle = acos(cosTheta);
+        smoothness = smoothness + abs(angle);
+    end
+end
+
+function collisionFree = checkCollisionFree(path, map)
+    if isempty(path)
+        collisionFree = false;
+        return;
+    end
+
+    occ = getOccupancy(map, path(:,1:2));
+    collisionFree = all(occ < 0.5);
+end
