@@ -1,7 +1,7 @@
 % EE 470 Final Project 
 % Comparison of A* and RRT* path planning algorithms 
 
-% Authors: Rodrigo Menchaca, Paul Levit 
+% Authors: Rodrigo Menchaca, Paul Levin 
 
 clc;
 clear;
